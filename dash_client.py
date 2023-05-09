@@ -17,6 +17,7 @@ from base.configuration_parser import ConfigurationParser
 from base.scheduler import Scheduler
 from connection.connection_handler import ConnectionHandler
 from player.player import Player
+from player.loggers import PlayerLogger
 
 
 class DashClient:
@@ -30,14 +31,16 @@ class DashClient:
 
         self.modules = []
 
+        self.playerLogger = PlayerLogger(0, 0, 0)
+
         # adding modules to manage
-        self.player = Player(0)
+        self.player = Player(0, self.playerLogger)
 
         # automatic loading class by the name
         r2a_class = getattr(importlib.import_module('r2a.' + r2a_algorithm.lower()), r2a_algorithm)
         self.r2a = r2a_class(1)
 
-        self.connection_handler = ConnectionHandler(2)
+        self.connection_handler = ConnectionHandler(2, self.playerLogger)
 
         self.modules.append(self.player)
         self.modules.append(self.r2a)

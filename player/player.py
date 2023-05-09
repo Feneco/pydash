@@ -14,6 +14,7 @@ import os
 import threading
 import time
 from matplotlib import pyplot as plt
+import math
 import statistics
 
 from base.configuration_parser import ConfigurationParser
@@ -25,7 +26,7 @@ from player.parser import *
 from base.whiteboard import Whiteboard
 
 '''
-quality_id - Taxa em que o video foi codificado (46980bps, ..., 4726737bps) 
+quality_id - Taxa em que o video foi codificado (46980bps, ..., 4726737bps)
 qi         - indice de qualidade normalizado
 segment_id - número de sequência do arquivo de video
 
@@ -36,7 +37,7 @@ Player is a Singleton class implementation
 
 class Player(SimpleModule):
 
-    def __init__(self, id):
+    def __init__(self, id, playerLogger):
         SimpleModule.__init__(self, id)
 
         config_parser = ConfigurationParser.get_instance()
@@ -98,6 +99,10 @@ class Player(SimpleModule):
         self.whiteboard.add_playback_segment_size_time_at_buffer(self.playback_segment_size_time_at_buffer)
         self.whiteboard.add_max_buffer_size(self.max_buffer_size)
 
+        self.playerLogger = playerLogger
+        self.playerLogger.maxBufferLength = self.max_buffer_size
+        self.logger_thread = threading.Thread(target=self.playerLog)
+
     def get_qi(self, quality_qi):
         return self.qi.index(quality_qi)
 
@@ -137,11 +142,12 @@ class Player(SimpleModule):
             buffer_size = self.get_amount_of_video_to_play_without_lock()
             # print(f'{current_time} player acordou')
 
+            self.playerLogger.setBuffer(buffer_size)
+
             # there is something to play
             if buffer_size > 0:
                 # player thread is sleeping.
                 if buffer_size >= self.max_buffer_size and not self.already_downloading:
-                    print(f'{current_time} Acordar Player Thread!')
                     self.player_thread_events.set()
                     self.player_thread_events.clear()
 
@@ -159,10 +165,10 @@ class Player(SimpleModule):
 
                 buffer_size = self.get_amount_of_video_to_play_without_lock()
                 self.playback_buffer_size.add(current_time, buffer_size)
-                print(f'Execution Time {current_time} > buffer size: {buffer_size}')
 
                 if self.pause_started_at is not None:
                     # pause_time = (time.time_ns() - self.pause_started_at) * 1e-9
+                    self.playerLogger.setPlaying()
                     pause_time = current_time - self.pause_started_at
                     self.playback_pauses.add(current_time, pause_time)
                     self.pause_started_at = None
@@ -171,6 +177,7 @@ class Player(SimpleModule):
                 self.playback.add(current_time, 0)
 
                 if self.pause_started_at is None:
+                    self.playerLogger.setPaused()
                     self.pauses_number += 1
                     self.pause_started_at = current_time
 
@@ -179,12 +186,20 @@ class Player(SimpleModule):
             self.lock.release()
 
             if (not threading.main_thread().is_alive() or self.kill_playback_thread) and buffer_size <= 0:
-                print(f'Execution Time {current_time}  thread {threading.get_ident()} will be killed.')
+                self.playerLogger.setStopped()
+                self.playerLogger.addAdditionalMessage(f'Execution Time {current_time}  thread {threading.get_ident()} will be killed.')
                 break
 
             # playback steps
             # print(f'{current_time} player vai dormir')
             time.sleep(self.playback_step)
+
+    def playerLog(self):
+        while True:
+            self.playerLogger.log()
+            if (not threading.main_thread().is_alive() or self.kill_playback_thread) and self.get_amount_of_video_to_play_without_lock() <= 0:
+                break
+            time.sleep(self.playback_step/5)
 
     def buffering_video_segment(self, msg):
         # buffer already stored the segment id
@@ -199,11 +214,12 @@ class Player(SimpleModule):
         current_time = self.timer.get_current_time()
         buffer_size = self.get_amount_of_video_to_play()
         self.playback_buffer_size.add(current_time, buffer_size)
-        print(f'Execution Time {current_time} > buffer size: {buffer_size}')
+        self.playerLogger.setBuffer(buffer_size)
 
         if self.buffer_initialization and self.get_amount_of_video_to_play() >= self.buffering_until:
             self.buffer_initialization = False
-            print(f'Execution Time {self.timer.get_current_time()} buffering process is concluded')
+            self.playerLogger.addAdditionalMessage(f'Video started playing')
+            self.playerLogger.setPlaying()
             self.playback_thread.start()
 
     def store_in_buffer(self, qi, segment_size):
@@ -237,7 +253,7 @@ class Player(SimpleModule):
         # set status to downloading a segment
         self.already_downloading = True
 
-        print(f'Execution Time {self.timer.get_current_time()} > request: {segment_request}')
+        self.playerLogger.setRequestNumber(segment_request.segment_id)
 
         self.send_down(segment_request)
 
@@ -278,6 +294,12 @@ class Player(SimpleModule):
     def handle_xml_response(self, msg):
         self.parsed_mpd = parse_mpd(msg.get_payload())
         self.qi = self.parsed_mpd.get_qi()
+
+        numberOfSegments = math.ceil(self.parsed_mpd.get_video_length_seconds() / self.parsed_mpd.get_segment_length_seconds())
+        self.playerLogger.maxRequestsQtd = numberOfSegments
+        self.playerLogger.maxQi = len(self.parsed_mpd.get_qi())
+
+        self.logger_thread.start()
         self.request_next_segment()
 
     def handle_segment_size_response(self, msg):
@@ -286,21 +308,18 @@ class Player(SimpleModule):
         self.already_downloading = False
 
         current_time = self.timer.get_current_time()
-        print(f'Execution Time {current_time} > received: {msg}')
 
         if msg.found():
             measured_throughput = msg.get_bit_length() / (time.perf_counter() - self.request_time)
             self.throughput.add(current_time, measured_throughput)
 
-            print(f'Execution Time {self.timer.get_current_time()} > measured throughput: {measured_throughput}')
+            self.playerLogger.setResponse(msg.segment_id, measured_throughput)
 
             # self.throughput.add(current_time, msg.get_bit_length() /(current_time - self.request_time))
             self.buffering_video_segment(msg)
 
             # still have space in buffer to download next ss
             if self.get_amount_of_video_to_play() >= self.max_buffer_size:
-                print(
-                    f'Execution Time {current_time} Maximum buffer size is achieved... the principal process will sleep now.')
                 self.player_thread_events.wait()
 
             self.request_next_segment()
@@ -314,10 +333,12 @@ class Player(SimpleModule):
                 self.playback_thread.join()
             '''
         else:
-            print(f'Execution Time {current_time} All video\'s segments was downloaded')
+            self.playerLogger.addAdditionalMessage(f'Execution Time {current_time} All video\'s segments were downloaded')
             self.kill_playback_thread = True
             if self.playback_thread.is_alive():
                 self.playback_thread.join()
+            if self.logger_thread.is_alive():
+                self.logger_thread.join()
 
     def __multiplication_factor(self, values: list):
         units = ['Bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps']

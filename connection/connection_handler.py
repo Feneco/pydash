@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 class ConnectionHandler(SimpleModule):
 
-    def __init__(self, id):
+    def __init__(self, id, playerLogger):
         SimpleModule.__init__(self, id)
         self.initial_time = 0
         self.qi = []
@@ -55,6 +55,8 @@ class ConnectionHandler(SimpleModule):
                 self.traffic_shaping_sequence.append(2)
 
         self.timer = Timer.get_instance()
+
+        self.playerLogger = playerLogger
 
     def get_traffic_shaping_positions(self, delta_time=0.0):
         current_tsi = (self.timer.get_current_time() + delta_time) // self.traffic_shaping_interval
@@ -169,7 +171,7 @@ class ConnectionHandler(SimpleModule):
         ss_file = ''
         self.initial_time = time.perf_counter()
 
-        print(f'Execution Time {self.timer.get_current_time()} > selected QI: {self.qi.index(msg.get_quality_id())}')
+        self.playerLogger.setRequest(self.qi.index(msg.get_quality_id()))
 
         try:
             connection = http.client.HTTPConnection(host_name, port)
